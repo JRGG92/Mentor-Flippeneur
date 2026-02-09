@@ -10,3 +10,9 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Mentor Flippeneur escuchando en puerto " + PORT);
 });
+app.use(express.json());
+
+app.post("/webhook", (req, res) => {
+  console.log("Webhook recibido:", JSON.stringify(req.body, null, 2));
+  res.sendStatus(200);
+});
