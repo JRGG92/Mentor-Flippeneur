@@ -6,12 +6,10 @@ app.use(express.json());
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "mentorflippeneur123";
 const PORT = process.env.PORT || 3000;
 
-// Health check
 app.get("/", (req, res) => {
   res.send("Mentor Flippeneur activo");
 });
 
-// Webhook verification (Meta)
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -23,7 +21,6 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Webhook receiver
 app.post("/webhook", (req, res) => {
   console.log("Webhook recibido:", JSON.stringify(req.body, null, 2));
   res.sendStatus(200);
