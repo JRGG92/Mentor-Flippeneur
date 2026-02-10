@@ -1,1 +1,11 @@
-{"name":"mentor-flippeneur","version":"1.0.0","main":"index.js","scripts":{"start":"node index.js"},"description":"Mentor Flippeneur","repository":{"type":"git","url":"git+https://github.com/JRGG92/mentor-flippeneur.git"},"keywords":[],"author":"","license":"ISC","type":"commonjs","bugs":{"url":"https://github.com/JRGG92/mentor-flippeneur/issues"},"homepage":"https://github.com/JRGG92/mentor-flippeneur#readme","dependencies":{"express":"^5.2.1"}}
+{
+  "name": "mentor-flippeneur",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
