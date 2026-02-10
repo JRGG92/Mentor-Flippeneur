@@ -1,18 +1,15 @@
 const express = require("express");
 const app = express();
 
-// Middleware para leer JSON
+// Middleware para JSON
 app.use(express.json());
 
-// Puerto que usa Railway
-const PORT = process.env.PORT || 8080;
-
-// ✅ Ruta principal
+// Ruta raíz (healthcheck)
 app.get("/", (req, res) => {
   res.send("Mentor Flippeneur activo");
 });
 
-// ✅ WEBHOOK DE VERIFICACIÓN (ESTO ES CLAVE)
+// Webhook de verificación (Meta)
 app.get("/webhook", (req, res) => {
   const VERIFY_TOKEN = "mentorflippeneur123";
 
@@ -28,13 +25,14 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ✅ WEBHOOK PARA MENSAJES (POST)
+// Webhook para mensajes entrantes
 app.post("/webhook", (req, res) => {
-  console.log("Evento recibido:", JSON.stringify(req.body, null, 2));
+  console.log("Mensaje recibido:", JSON.stringify(req.body, null, 2));
   res.sendStatus(200);
 });
 
-// Iniciar servidor
+// Puerto Railway
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Mentor Flippeneur escuchando en puerto ${PORT}`);
 });
