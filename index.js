@@ -32,7 +32,11 @@ app.post("/webhook", (req, res) => {
 });
 
 // Puerto Railway
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
+const PORT = process.env.PORT;
+if (!PORT) {
+  throw new Error("PORT no definido por Railway");
+}
+
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Mentor Flippeneur escuchando en puerto ${PORT}`);
 });
