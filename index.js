@@ -4,6 +4,8 @@ const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fet
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
 
 const PORT = process.env.PORT || 8080;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "mentorflippeneur123";
@@ -77,6 +79,32 @@ app.post("/webhook", async (req, res) => {
   } catch (err) {
     console.error("Error webhook:", err);
     return res.sendStatus(200);
+  }
+});
+
+app.post("/twilio", async (req, res) => {
+  const incomingMsg = req.body.Body;
+  const from = req.body.From;
+
+  console.log("Mensaje Twilio:", incomingMsg);
+
+  const twilio = require("twilio");
+  const client = twilio(
+    process.env.TWILIO_SID,
+    process.env.TWILIO_AUTH_TOKEN
+  );
+
+  try {
+    await client.messages.create({
+      from: "whatsapp:+14155238886", // sandbox Twilio
+      to: from,
+      body: "Recibimos tu mensaje: " + incomingMsg
+    });
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("Error enviando mensaje:", error);
+    res.sendStatus(500);
   }
 });
 
