@@ -6,9 +6,11 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "@dqbd/tiktoken": "^1.0.22",
     "express": "^4.22.1",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
+    "openai": "^6.21.0",
     "twilio": "^5.12.1"
   }
 }
