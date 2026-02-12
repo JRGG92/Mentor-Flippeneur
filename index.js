@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
+const { OpenAI } = require("openai");
 
 const app = express();
 
@@ -11,168 +12,176 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 
-/**
- * =========================
- * 1) RUTAS BÁSICAS
- * =========================
- */
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const MODEL = process.env.MODEL || "gpt-4o-mini";
+const WEB_SEARCH = (process.env.WEB_SEARCH || "off").toLowerCase() === "on";
+
+const ALLOWED_TOPICS = (process.env.ALLOWED_TOPICS || "")
+  .split(",")
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+
+// Storage local para VTT (Railway: /tmp es seguro para runtime, pero se borra si reinicia)
+// Para persistencia real luego metemos S3 / Cloudinary / Supabase.
+const DATA_DIR = "/tmp/mentor_data";
+const VTT_DIR = path.join(DATA_DIR, "vtt");
+fs.mkdirSync(VTT_DIR, { recursive: true });
+
+// Multer para upload
+const upload = multer({ dest: VTT_DIR });
+
+// “Base de conocimiento” en memoria (simple)
+let KB_TEXT = ""; // concatenado de VTT procesados
 
 // Home
 app.get("/", (req, res) => {
   res.status(200).send("Mentor Flippeneur activo ✅");
 });
 
-// Healthcheck (Railway)
+// Healthcheck (para Railway)
 app.get("/health", (req, res) => {
   res.status(200).send("ok");
 });
 
-/**
- * =========================
- * 2) SUBIDA DE ARCHIVOS .VTT
- * =========================
- * Nota: Railway tiene filesystem EFÍMERO. Esto te sirve “por mientras”.
- * Más adelante lo guardamos en S3 / Supabase Storage / Drive.
- */
+// Admin upload (POST) — subir VTT
+app.post("/admin/upload-vtt", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ ok: false, error: "No file uploaded. Field name must be 'file'." });
 
-const uploadDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    const filePath = req.file.path;
+    const raw = fs.readFileSync(filePath, "utf8");
+    const clean = vttToCleanText(raw);
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
-    cb(null, `${Date.now()}_${safeName}`);
-  },
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
-});
+    // Añadimos a KB
+    KB_TEXT += "\n\n" + clean;
 
-// UI simple para subir .vtt
-app.get("/admin/upload-vtt", (req, res) => {
-  res
-    .status(200)
-    .type("text/html")
-    .send(`
-      <h2>Subir archivo .VTT (Mentor Flippeneur)</h2>
-      <form action="/admin/upload-vtt" method="post" enctype="multipart/form-data">
-        <input type="file" name="file" accept=".vtt" required />
-        <button type="submit">Subir</button>
-      </form>
-      <p>Tip: Railway guarda esto temporalmente. Luego lo migramos a almacenamiento real.</p>
-    `);
+    return res.json({
+      ok: true,
+      filename: req.file.originalname,
+      added_chars: clean.length,
+      total_chars: KB_TEXT.length
+    });
+  } catch (e) {
+    console.error("upload-vtt error:", e);
+    res.status(500).json({ ok: false, error: "Upload failed" });
+  }
 });
 
-app.post("/admin/upload-vtt", upload.single("file"), (req, res) => {
-  if (!req.file) return res.status(400).send("No se subió ningún archivo.");
-  const ext = path.extname(req.file.originalname).toLowerCase();
-  if (ext !== ".vtt") return res.status(400).send("Solo se aceptan .vtt");
+// Twilio webhook (WhatsApp)
+app.post("/twilio", async (req, res) => {
+  try {
+    const incomingMsg = (req.body.Body || "").trim();
+    const from = req.body.From || "";
 
-  console.log("✅ VTT subido:", {
-    original: req.file.originalname,
-    savedAs: req.file.filename,
-    size: req.file.size,
+    console.log("Mensaje Twilio recibido:", { from, incomingMsg });
+
+    // 1) Si no hay OpenAI key
+    if (!openai) {
+      return twiml(res, "⚠️ Falta configurar OPENAI_API_KEY en Railway.");
+    }
+
+    // 2) Clasificar si es tema permitido
+    const gate = await classifyAllowed(incomingMsg);
+
+    if (!gate.allowed) {
+      return twiml(
+        res,
+        `✅ Mentor Flippeneur\n\n` +
+          `Por ahora solo respondo temas de Flipping y temas relacionados (Meta Ads, Infonavit/trámites, captación, remodelación, análisis, venta).\n\n` +
+          `Tu pregunta parece ser de otro tema: "${gate.topic}".`
+      );
+    }
+
+    // 3) Responder con RAG simple (VTT)
+    const answer = await answerWithKB(incomingMsg);
+
+    return twiml(res, answer);
+  } catch (e) {
+    console.error("twilio webhook error:", e);
+    return twiml(res, "⚠️ Hubo un error interno. Intenta de nuevo.");
+  }
+});
+
+// ===== IA =====
+
+async function classifyAllowed(question) {
+  // Si no configuraste allowed topics, por defecto permitimos flipping + meta ads + infonavit
+  const allowedList = ALLOWED_TOPICS.length
+    ? ALLOWED_TOPICS
+    : ["flipping", "meta_ads", "infonavit", "tramites", "captacion", "remodelacion", "venta", "analisis"];
+
+  const sys = `Eres un clasificador. Devuelve JSON estricto.
+allowed=true si la pregunta es sobre: ${allowedList.join(", ")}.
+allowed=false si es otra cosa (salud, política, chismes, etc).
+Devuelve: {"allowed": boolean, "topic": "..."}.`;
+
+  const r = await openai.chat.completions.create({
+    model: MODEL,
+    temperature: 0,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: question }
+    ],
+    response_format: { type: "json_object" }
   });
 
-  res.status(200).send(`✅ Subido: ${req.file.originalname}`);
-});
-
-/**
- * =========================
- * 3) LÓGICA DEL BOT (MVP)
- * =========================
- * - Detecta si es tema permitido (flipping / Meta Ads / Infonavit / etc.)
- * - Si no, responde que no está entrenado
- *
- * Luego conectamos IA:
- * - RAG con tus .vtt (vector db)
- * - Si no está en VTT pero sí es tema permitido -> buscar web
- */
-
-const ALLOWED_TOPICS_HINTS = [
-  "flipping",
-  "flip",
-  "infonavit",
-  "crédito",
-  "traspaso",
-  "escrituras",
-  "notario",
-  "remodel",
-  "remodelación",
-  "presupuesto",
-  "obra",
-  "contratista",
-  "meta ads",
-  "facebook ads",
-  "publicidad",
-  "campaña",
-  "leads",
-  "whatsapp",
-  "kommo",
-];
-
-function isAllowedTopic(text) {
-  const t = (text || "").toLowerCase();
-  return ALLOWED_TOPICS_HINTS.some((k) => t.includes(k));
+  try {
+    return JSON.parse(r.choices[0].message.content);
+  } catch {
+    return { allowed: true, topic: "unknown" };
+  }
 }
 
-function buildReply(userText) {
-  const clean = (userText || "").trim();
+async function answerWithKB(question) {
+  const hasKB = KB_TEXT.trim().length > 200;
 
-  if (!clean) {
-    return `✅ Mentor Flippeneur\n\nEscríbeme tu duda (Flipping / Infonavit / Meta Ads / captación / remodelación / venta).`;
+  // Si no hay VTT cargados, igual responde “general” (y te avisa)
+  const kbContext = hasKB ? clipText(KB_TEXT, 12000) : "";
+
+  const sys =
+    `Eres Mentor Flippeneur. Respondes en español, directo y útil.\n` +
+    `Reglas:\n` +
+    `- Solo responde temas permitidos (flipping, meta ads, infonavit/trámites relacionados).\n` +
+    `- Si la respuesta NO está soportada por el conocimiento proporcionado, dilo: "No lo vi en mis notas".\n` +
+    `- Si WEB_SEARCH=on y no está en notas, sugiere una respuesta general y marca que viene de "conocimiento general". No inventes datos legales.\n` +
+    `- Respuestas cortas para WhatsApp: máximo 8-12 líneas.\n`;
+
+  const user =
+    (hasKB
+      ? `NOTAS (VTT/Zoom):\n${kbContext}\n\n`
+      : `NOTAS: (vacías por ahora, no has subido VTT)\n\n`) +
+    `PREGUNTA:\n${question}\n\n` +
+    `Responde ahora.`;
+
+  const r = await openai.chat.completions.create({
+    model: MODEL,
+    temperature: 0.4,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: user }
+    ]
+  });
+
+  let out = (r.choices[0].message.content || "").trim();
+
+  if (!hasKB) {
+    out = "⚠️ Aún no has subido VTT al mentor.\n\n" + out;
   }
 
-  if (!isAllowedTopic(clean)) {
-    return (
-      `✅ Mentor Flippeneur\n\n` +
-      `Ahorita no estoy entrenado para responder eso.\n` +
-      `Puedo ayudarte con:\n` +
-      `• Flipping (captación, análisis, remodelación, venta)\n` +
-      `• Trámites Infonavit / cuentas mancomunadas\n` +
-      `• Publicidad (Meta Ads) para captar leads\n\n` +
-      `Vuelve a intentar con una pregunta de esos temas.`
-    );
-  }
-
-  // MVP: respuesta temporal (luego aquí va la IA)
-  return (
-    `✅ Mentor Flippeneur\n\n` +
-    `Entendido. Tu duda sí cae dentro de mis temas.\n\n` +
-    `Pregunta recibida:\n"${clean}"\n\n` +
-    `Para contestarte perfecto dime 2 cosas:\n` +
-    `1) ¿En qué ciudad/estado estás?\n` +
-    `2) ¿Es captación, análisis, remodelación o venta?`
-  );
+  return `✅ Mentor Flippeneur\n\n${out}`;
 }
 
-/**
- * =========================
- * 4) WEBHOOK TWILIO (WhatsApp)
- * =========================
- * Twilio espera TwiML (XML) como respuesta.
- * Configura en Twilio Sandbox:
- * "When a message comes in" -> https://TU-DOMINIO.up.railway.app/twilio (POST)
- */
-
-app.post("/twilio", (req, res) => {
-  const incomingMsg = (req.body.Body || "").trim();
-  const from = req.body.From; // ej: "whatsapp:+52..."
-
-  console.log("📩 Mensaje Twilio recibido:", { from, incomingMsg });
-
-  const reply = buildReply(incomingMsg);
-
+// ===== helpers =====
+function twiml(res, msg) {
   res.type("text/xml").status(200).send(`
     <Response>
-      <Message>${escapeXml(reply)}</Message>
+      <Message>${escapeXml(msg)}</Message>
     </Response>
   `);
-});
+}
 
-// Helper para no romper XML
 function escapeXml(str) {
   return String(str)
     .replace(/&/g, "&amp;")
@@ -180,6 +189,22 @@ function escapeXml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function vttToCleanText(vtt) {
+  // Quita timestamps y líneas vacías, y cues numéricos
+  return vtt
+    .split("\n")
+    .map(l => l.trim())
+    .filter(l => l && !l.match(/^WEBVTT/i))
+    .filter(l => !l.match(/^\d+$/))
+    .filter(l => !l.match(/^\d\d:\d\d:\d\d\.\d\d\d\s-->\s\d\d:\d\d:\d\d\.\d\d\d/))
+    .join(" ");
+}
+
+function clipText(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  return text.slice(text.length - maxChars); // mantiene lo más reciente
 }
 
 app.listen(PORT, "0.0.0.0", () => {
