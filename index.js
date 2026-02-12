@@ -1,113 +1,89 @@
-const express = require("express");
-const fetch = (...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args));
+// index.js
+"use strict";
 
+const express = require("express");
+const twilio = require("twilio");
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
 
+// Twilio manda por defecto x-www-form-urlencoded
+app.use(express.urlencoded({ extended: false }));
+// Por si luego usas JSON
+app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "mentorflippeneur123";
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-app.get("/", (req, res) => res.send("Mentor Flippeneur activo ✅"));
+// ✅ Variables necesarias para Twilio
+const TWILIO_SID = process.env.TWILIO_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-/** Verificación del webhook (Meta) */
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+// Opcional: si quieres “forzar” que solo responda si llega al número correcto
+// const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM; // ej: "whatsapp:+14155238886"
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+function requireEnv(name, value) {
+  if (!value) {
+    console.error(`❌ Falta variable de entorno: ${name}`);
+    return false;
   }
-  return res.sendStatus(403);
+  return true;
+}
+
+// Healthcheck Railway
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
 });
 
-/** Recibe mensajes */
-app.post("/webhook", async (req, res) => {
+// ✅ Webhook para Twilio WhatsApp (Sandbox o número real)
+app.post("/twilio", async (req, res) => {
   try {
-    const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
+    // Si quieres ver todo lo que llega:
+    // console.log("📩 Twilio payload:", req.body);
 
-    // Esto llega cuando entra un mensaje
-    const msg = value?.messages?.[0];
-    if (!msg) return res.sendStatus(200);
+    const from = req.body.From; // ej "whatsapp:+52...."
+    const body = (req.body.Body || "").trim();
 
-    const from = msg.from; // número del usuario (sin +)
-    const text = msg?.text?.body || "";
+    console.log(`📩 Mensaje Twilio de ${from}: ${body}`);
 
-    console.log("Mensaje recibido de:", from, "Texto:", text);
-
-    // ✅ Regla: solo respondo si empieza con "@mentor" (porque en WA Cloud no hay @mention real)
-    const shouldReply = text.trim().toLowerCase().startsWith("@mentor");
-
-    if (!shouldReply) return res.sendStatus(200);
-
-    if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
-      console.log("❌ Faltan variables WHATSAPP_TOKEN o PHONE_NUMBER_ID");
-      return res.sendStatus(200);
+    // Validar credenciales Twilio
+    const ok1 = requireEnv("TWILIO_SID", TWILIO_SID);
+    const ok2 = requireEnv("TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN);
+    if (!ok1 || !ok2) {
+      return res.status(500).send("Missing Twilio credentials");
     }
 
-    const reply =
-      `✅ Mentor Flippeneur aquí.\n\n` +
-      `Recibí tu pregunta:\n"${text}"\n\n` +
-      `Dime: ¿esto es sobre (1) Infonavit (2) Captación/compra (3) Remodelación (4) Venta?`;
+    // ✅ Respuesta (aquí luego conectamos con IA / base de conocimiento)
+    const replyText =
+      `Mentor Flippeneur 🤖\n` +
+      `Recibí tu mensaje: "${body}"\n\n` +
+      `Dime:\n` +
+      `1) Ciudad\n` +
+      `2) Presupuesto aproximado\n` +
+      `3) Tipo de propiedad (casa/depa)\n` +
+      `y te doy una guía rápida.`;
 
-    const url = `https://graph.facebook.com/v22.0/${PHONE_NUMBER_ID}/messages`;
+    // Opción A (simple): responder con TwiML (lo más estable para webhook)
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(replyText);
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: from,
-        text: { body: reply },
-      }),
-    });
+    res.set("Content-Type", "text/xml");
+    return res.status(200).send(twiml.toString());
 
-    const data = await resp.json();
-    console.log("Respuesta WA:", resp.status, data);
-
-    return res.sendStatus(200);
+    // Opción B: responder enviando mensaje con la API (NO necesario aquí)
+    // const client = twilio(TWILIO_SID, TWILIO_AUTH_TOKEN);
+    // await client.messages.create({
+    //   from: req.body.To, // el número de Twilio (whatsapp:+1415...)
+    //   to: from,
+    //   body: replyText,
+    // });
+    // return res.status(200).send("OK");
   } catch (err) {
-    console.error("Error webhook:", err);
-    return res.sendStatus(200);
+    console.error("❌ Error en /twilio:", err);
+    return res.status(500).send("Server error");
   }
 });
 
-app.post("/twilio", async (req, res) => {
-  const incomingMsg = req.body.Body;
-  const from = req.body.From;
-
-  console.log("Mensaje Twilio:", incomingMsg);
-
-  const twilio = require("twilio");
-  const client = twilio(
-    process.env.TWILIO_SID,
-    process.env.TWILIO_AUTH_TOKEN
-  );
-
-  try {
-    await client.messages.create({
-      from: "whatsapp:+14155238886", // sandbox Twilio
-      to: from,
-      body: "Recibimos tu mensaje: " + incomingMsg
-    });
-
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("Error enviando mensaje:", error);
-    res.sendStatus(500);
-  }
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Mentor Flippeneur escuchando en puerto ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`✅ Mentor Flippeneur activo en puerto ${PORT}`);
+  console.log(`✅ Health: /health`);
+  console.log(`✅ Twilio webhook: /twilio`);
 });
